@@ -13,7 +13,6 @@
 ;;; You should have received a copy of the GNU General Public License
 ;;; along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-
 (defpackage #:webtentacle
   (:use #:cl)
   (:export :server :start-server :clack-response))
@@ -50,12 +49,13 @@ in the docstring of SERVER."
      :host host
      :aliases (list profile "https://example.example/users/old-user")
      :links
-     `(("href" ,profile
-        "rel"  "http://webfinger.net/rel/profile-page"
-        "type" "text/html")
-       ("href" ,profile
-        "rel"  "self"
-        "type" "application/activity+json")))))
+     `((href profile
+        rel  "http://webfinger.net/rel/profile-page"
+        type "text/html"
+             properties ,(alexandria:plist-hash-table '(:apple 3 :bear 4)))
+       (href ,profile
+        rel  "self"
+        type "application/activity+json")))))
 
 
 (defun resource-user-host (resource)
@@ -64,6 +64,30 @@ in the docstring of SERVER."
                         (subseq resource 5)
                         resource)))
     (str:split #\@ sans-acct)))
+
+
+(defun filter-link-rels (rels link-plists)
+  "Given a list of link property-lists, filter out links whose rel properties
+aren’t a member of the RELS list.
+If RELS is nil, nothing is filtered out.
+If RELS is a list of strings, only links with rel properties matching a member
+in RELS will remain."
+  (if rels
+      (remove-if-not
+       (lambda (plist)
+         (member (getf plist 'rel) rels :test #'equal))
+       link-plists)
+      link-plists))
+
+
+(defun filter-user-info-rels (rels user-info)
+  "Filter the :LINKS property-list’s properties from a USER-INFO property-list,
+by their relations.
+If RELS is nil, nothing is filtered out.
+If RELS is a list of strings, only links with rel properties matching a member
+in RELS will remain."
+  (setf (getf user-info :links) (filter-link-rels rels (getf user-info :links)))
+  user-info)
 
 
 (defun clack-response (user-info-func resource &rest rels)
@@ -75,9 +99,11 @@ rather handle the Webfinger path yourself."
   (list 200
         '(:content-type "text/plain")
         (list (format nil "~A~%"
-                          (apply #'user-json
-                             (apply user-info-func
-                                    (resource-user-host resource)))))))
+                      (apply #'user-json
+                             (filter-user-info-rels
+                              rels
+                              (apply user-info-func
+                                     (resource-user-host resource))))))))
 
 
 (defun server (env user-info-func &optional (clack-app nil))
@@ -99,22 +125,20 @@ You need at minimum :USER and :HOST, all else is optional.
 :PROPERTIES is a simple property-list of whatever you want.
 
 :LINKS is a list of property-lists, each with some of (or all) of the keys:
-  * “rel”
-  * “types”
-  * “href”
-  * “titles”
-  * “properties”
+  * rel
+  * types
+  * href
+  * titles
+  * properties
 … all of which are strings, except for the plists “titles” & “properties.”
 
 “properties” should be a property-list containing whatever you want.
 “titles” should contain a property for each language-code, with its
 value being the corresponding title; for example,
-  (“en” “Birds & Planes”
-   “eo” “Birdoj k Aviadiloj”
-   “es” “No habla español :-(”)
-
-Note that the property-lists’ keys are strings, rather than symbols!
-This includes :PROPERTIES."
+  '(en “Birds & Planes”
+    eo “Birdoj k Aviadiloj”
+    es “No habla español :-(”)
+"
   (let* ((uri (quri:uri (getf env :request-uri)))
          (params (quri:uri-query-params uri)))
     (if (string= (quri:uri-path uri) "/.well-known/webfinger")
@@ -123,10 +147,12 @@ This includes :PROPERTIES."
                (append (list user-info-func
                              (cdr (assoc "resource" params :test #'string=)))
                        ;; We want all “rel” parameters, not just the first one
-                       (remove-if-not
-                        (lambda (pair)
-                          (string= (car pair) "rel"))
-                        params)))
+                       (mapcar
+                        #'cdr
+                        (remove-if-not
+                          (lambda (pair)
+                            (string= (car pair) "rel"))
+                          params))))
         ;; At any other path, give control back over to the user’s server
         (or (and clack-app (funcall clack-app env))
             '(512 (:content-type "text/plain") ("HECK"))))))
@@ -140,4 +166,3 @@ It is also useful for debugging this library."
   (clack:clackup
    (lambda (env)
      (funcall #'server env user-info-func))))
-
