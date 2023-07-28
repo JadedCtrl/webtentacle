@@ -20,46 +20,44 @@
 (in-package #:webtentacle)
 
 
-(defun user-json (&key user host aliases properties links)
-  "Given the USER’s information, return the applicable Webfinger JSON.
-Details of the values of USER, HOST, ALIASES, PROPERTIES, and LINKS can be found
+(defun resource-json (&key subject aliases properties links)
+  "Given the RESOURCE’s information, return the applicable Webfinger JSON.
+Details of the values of RESOURCE, ALIASES, PROPERTIES, and LINKS can be found
 in the docstring of SERVER."
   (let ((yason:*symbol-key-encoder* #'yason:encode-symbol-as-lowercase)
         (yason:*symbol-encoder* #'yason:encode-symbol-as-lowercase))
     (yason:with-output-to-string* ()
-       (yason:with-object ()
-         (yason:encode-object-element
-          "subject"
-          (concatenate 'string "acct:" user "@" host))
-         (when (and aliases (listp aliases))
-           (yason:encode-object-element "aliases" aliases))
-         (when (and properties (listp properties))
-           (yason:encode-object-element
-            "properties"
-            (alexandria:plist-hash-table properties)))
-         (when (and links (listp links))
-           (yason:encode-object-element
-            "links"
-            ;; Each link needs to be a hash-table (so it's encoded as a JSON object.
-            (mapcar
-             (lambda (link)
-               ;; Each link’s properties/titles need to be hash-tables, likewise.
-               (let ((properties (getf link 'properties))
-                     (titles (getf link 'titles)))
-                 (when (and properties (not (hash-table-p properties)))
-                   (setf (getf link 'properties) (alexandria:plist-hash-table properties)))
-                 (when (and titles (not (hash-table-p titles)))
-                   (setf (getf link 'titles) (alexandria:plist-hash-table titles))))
-               (alexandria:plist-hash-table link))
-             links)))))))
+      (yason:with-object ()
+        (when subject
+          (yason:encode-object-element "subject" subject))
+        (when (and aliases (listp aliases))
+          (yason:encode-object-element "aliases" aliases))
+        (when (and properties (listp properties))
+          (yason:encode-object-element
+           "properties"
+           (alexandria:plist-hash-table properties)))
+        (when (and links (listp links))
+          (yason:encode-object-element
+           "links"
+           ;; Each link needs to be a hash-table (so it's encoded as a JSON object.
+           (mapcar
+            (lambda (link)
+              ;; Each link’s properties/titles need to be hash-tables, likewise.
+              (let ((properties (getf link 'properties))
+                    (titles (getf link 'titles)))
+                (when (and properties (not (hash-table-p properties)))
+                  (setf (getf link 'properties) (alexandria:plist-hash-table properties)))
+                (when (and titles (not (hash-table-p titles)))
+                  (setf (getf link 'titles) (alexandria:plist-hash-table titles))))
+              (alexandria:plist-hash-table link))
+            links)))))))
 
 
-(defun fake-info-func (user host)
-  "A testing function. This is a USER-INFO-FUNC function that outputs garbage."
-  (let ((profile (str:concat "https://example.example/users/" user)))
+(defun fake-info-func (resource)
+  "A testing function. This is a RESOURCE-INFO-FUNC function that outputs garbage."
+  (let ((profile (str:concat "https://example.example/users/" resource)))
     (list
-     :user user
-     :host host
+     :subject resource
      :aliases (list profile "https://example.example/users/old-user")
      :links
      `((href ,profile
@@ -69,23 +67,6 @@ in the docstring of SERVER."
        (href ,profile
         rel  "self"
         type "application/activity+json")))))
-
-
-(define-condition invalid-acct-uri (error) ()
-  (:documentation "Thrown when a user@host acct URI is expected, but is lacking a user or host potion."))
-
-
-(defun resource-user-host (resource)
-  "Given a queried RESOURCE, return a list of its contained user and host."
-  (let* ((sans-acct (if (str:starts-with-p "acct:" resource)
-                        (subseq resource 5)
-                        resource))
-         (user-host (str:split #\@ sans-acct)))
-    (if (or (not (eq (length user-host) 2))
-            (str:emptyp (car user-host))
-            (str:emptyp (cadr user-host)))
-        (error 'invalid-acct-uri :message "Invalid acct resource")
-        user-host)))
 
 
 (defun filter-link-rels (rels link-plists)
@@ -102,18 +83,18 @@ in RELS will remain."
       link-plists))
 
 
-(defun filter-user-info-rels (rels user-info)
-  "Filter the :LINKS property-list’s properties from a USER-INFO property-list,
+(defun filter-resource-info-rels (rels resource-info)
+  "Filter the :LINKS property-list’s properties from a RESOURCE-INFO property-list,
 by their relations.
 If RELS is nil, nothing is filtered out.
 If RELS is a list of strings, only links with rel properties matching a member
 in RELS will remain."
-  (setf (getf user-info :links) (filter-link-rels rels (getf user-info :links)))
-  user-info)
+  (setf (getf resource-info :links) (filter-link-rels rels (getf resource-info :links)))
+  resource-info)
 
 
-(defun clack-response (user-info-func resource &rest rels)
-  "Given a USER-INFO-FUNC (as per the specification of SERVER’s docstring), and
+(defun clack-response (resource-info-func resource &rest rels)
+  "Given a RESOURCE-INFO-FUNC (as per the specification of SERVER’s docstring), and
 the RESOURCE and RELS parameters from a Webfinger HTTP request, return the
 response JSON in Clack’s format.
 This can be used if you don’t want to wrap your server with SERVER, and would
@@ -125,34 +106,35 @@ rather handle the Webfinger path yourself."
     (format
      nil "~A"
      (handler-case
-         (if (not resource)
-             "\"No resource specified\""
-             (or (apply #'user-json
-                         (filter-user-info-rels
-                          rels
-                          (apply user-info-func
-                                 (resource-user-host resource))))
-                 "\"Couldn't find user\""))
-       (invalid-acct-uri ()
-         "\"Invalid acct URI\"")
+         (cond ((or (not resource) (str:emptyp resource))
+                "\"No resource specified\"")
+               ;; If not a URI (or even an acct URI without the “acct:”)
+               ((and (not (str:containsp ":" resource))
+                     (not (str:containsp "@" resource)))
+                "\"Resource not a URI\"")
+               ('t
+                (or (apply #'resource-json
+                            (filter-resource-info-rels
+                             rels
+                             (funcall resource-info-func resource)))
+                    "\"Couldn't find resource\"")))
        (error (any-error)
          (format nil "\"Server error: ~A\"" any-error)))))))
 
 
-(defun server (env user-info-func &optional (clack-app nil))
+(defun server (env resource-info-func &optional (clack-app nil))
   "Start handling Webfinger requests, wrapping around the given CLACK-APP body
 function.
 
-USER-INFO-FUNC should be a function that will return user information to be
-served by Webfinger.
-USER-INFO-FUNC should take two parameters: Username and host, both strings.
+RESOURCE-INFO-FUNC should be a function that will return resource information to
+be served by Webfinger.
+RESOURCE-INFO-FUNC should take one parameter, the resource string.
 It should return a property-list with some of the following properties:
-  * :USER
-  * :HOST
+  * :SUBJECT
   * :ALIASES
   * :PROPERTIES
   * :LINKS
-You need at minimum :USER and :HOST, all else is optional.
+You need at minimum :SUBJECT, all else is optional.
 
 :ALIASES is a simple list of URLs.
 :PROPERTIES is a simple property-list of whatever you want.
@@ -177,7 +159,7 @@ value being the corresponding title; for example,
     (if (string= (quri:uri-path uri) "/.well-known/webfinger")
         ;; We only want to handle the *exact* webfinger path
         (apply #'clack-response
-               (append (list user-info-func
+               (append (list resource-info-func
                              (cdr (assoc "resource" params :test #'string=)))
                        ;; We want all “rel” parameters, not just the first one
                        (mapcar
@@ -191,11 +173,11 @@ value being the corresponding title; for example,
             '(512 (:content-type "text/plain") ("HECK"))))))
 
 
-(defun start-server (user-info-func)
-  "Run a Webfinger HTTP server, given a USER-INFO-FUNC (see SERVER’s docstring).
+(defun start-server (resource-info-func)
+  "Run a Webfinger HTTP server, given a RESOURCE-INFO-FUNC (see SERVER’s docstring).
 This is useful if you want to delegate Webfinger-handling to this library with a
 reverse-proxy.
 It is also useful for debugging this library."
   (clack:clackup
    (lambda (env)
-     (funcall #'server env user-info-func))))
+     (funcall #'server env resource-info-func))))
