@@ -24,21 +24,34 @@
   "Given the USER’s information, return the applicable Webfinger JSON.
 Details of the values of USER, HOST, ALIASES, PROPERTIES, and LINKS can be found
 in the docstring of SERVER."
-  (yason:with-output-to-string* ()
-    (yason:with-object ()
-      (yason:encode-object-element
-       "subject"
-       (concatenate 'string "acct:" user "@" host))
-      (when (and aliases (listp aliases))
-        (yason:encode-object-element "aliases" aliases))
-      (when (and properties (listp properties))
-        (yason:encode-object-element
-         "properties"
-         (alexandria:plist-hash-table properties)))
-      (when (and links (listp links))
-        (yason:encode-object-element
-         "links"
-         (mapcar #'alexandria:plist-hash-table links))))))
+  (let ((yason:*symbol-key-encoder* #'yason:encode-symbol-as-lowercase)
+        (yason:*symbol-encoder* #'yason:encode-symbol-as-lowercase))
+    (yason:with-output-to-string* ()
+       (yason:with-object ()
+         (yason:encode-object-element
+          "subject"
+          (concatenate 'string "acct:" user "@" host))
+         (when (and aliases (listp aliases))
+           (yason:encode-object-element "aliases" aliases))
+         (when (and properties (listp properties))
+           (yason:encode-object-element
+            "properties"
+            (alexandria:plist-hash-table properties)))
+         (when (and links (listp links))
+           (yason:encode-object-element
+            "links"
+            ;; Each link needs to be a hash-table (so it's encoded as a JSON object.
+            (mapcar
+             (lambda (link)
+               ;; Each link’s properties/titles need to be hash-tables, likewise.
+               (let ((properties (getf link 'properties))
+                     (titles (getf link 'titles)))
+                 (when (and properties (not (hash-table-p properties)))
+                   (setf (getf link 'properties) (alexandria:plist-hash-table properties)))
+                 (when (and titles (not (hash-table-p titles)))
+                   (setf (getf link 'titles) (alexandria:plist-hash-table titles))))
+               (alexandria:plist-hash-table link))
+             links)))))))
 
 
 (defun fake-info-func (user host)
@@ -49,10 +62,10 @@ in the docstring of SERVER."
      :host host
      :aliases (list profile "https://example.example/users/old-user")
      :links
-     `((href profile
+     `((href ,profile
         rel  "http://webfinger.net/rel/profile-page"
         type "text/html"
-             properties ,(alexandria:plist-hash-table '(:apple 3 :bear 4)))
+             properties (:apple 3 :bear 4))
        (href ,profile
         rel  "self"
         type "application/activity+json")))))
