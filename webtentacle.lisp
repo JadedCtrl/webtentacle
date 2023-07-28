@@ -71,12 +71,21 @@ in the docstring of SERVER."
         type "application/activity+json")))))
 
 
+(define-condition invalid-acct-uri (error) ()
+  (:documentation "Thrown when a user@host acct URI is expected, but is lacking a user or host potion."))
+
+
 (defun resource-user-host (resource)
   "Given a queried RESOURCE, return a list of its contained user and host."
   (let* ((sans-acct (if (str:starts-with-p "acct:" resource)
                         (subseq resource 5)
-                        resource)))
-    (str:split #\@ sans-acct)))
+                        resource))
+         (user-host (str:split #\@ sans-acct)))
+    (if (or (not (eq (length user-host) 2))
+            (str:emptyp (car user-host))
+            (str:emptyp (cadr user-host)))
+        (error 'invalid-acct-uri :message "Invalid acct resource")
+        user-host)))
 
 
 (defun filter-link-rels (rels link-plists)
@@ -109,14 +118,25 @@ the RESOURCE and RELS parameters from a Webfinger HTTP request, return the
 response JSON in Clack’s format.
 This can be used if you don’t want to wrap your server with SERVER, and would
 rather handle the Webfinger path yourself."
-  (list 200
-        '(:content-type "text/plain")
-        (list (format nil "~A~%"
-                      (apply #'user-json
-                             (filter-user-info-rels
-                              rels
-                              (apply user-info-func
-                                     (resource-user-host resource))))))))
+  (list
+   200
+   '(:content-type "text/plain")
+   (list
+    (format
+     nil "~A"
+     (handler-case
+         (if (not resource)
+             "\"No resource specified\""
+             (or (apply #'user-json
+                         (filter-user-info-rels
+                          rels
+                          (apply user-info-func
+                                 (resource-user-host resource))))
+                 "\"Couldn't find user\""))
+       (invalid-acct-uri ()
+         "\"Invalid acct URI\"")
+       (error (any-error)
+         (format nil "\"Server error: ~A\"" any-error)))))))
 
 
 (defun server (env user-info-func &optional (clack-app nil))
